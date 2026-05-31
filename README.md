@@ -2,7 +2,7 @@
 
 > A local-first AI system that tracks your actual interview preparation progress — not a generic chatbot.
 
-![Demo](docs/demo.gif)
+![Demo](docs/demo.mov)
 
 ---
 
