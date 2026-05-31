@@ -3,7 +3,10 @@ from pydantic import BaseModel
 from typing import Optional
 from pathlib import Path
 
-from app.services.analysis_service import analyze_weakness, score_star_answer, generate_revision_questions, detect_dsa_patterns
+from app.services.analysis_service import (
+    analyze_weakness, score_star_answer,
+    generate_revision_questions, detect_dsa_patterns,
+)
 from app.repositories.stats_repository import StatsRepository
 from app.repositories.session_repository import SessionRepository
 from app.services.memory_service import MemoryService
@@ -41,8 +44,10 @@ async def analyze_session_weakness(req: WeaknessRequest):
         raise HTTPException(status_code=404, detail="Session not found")
     if len(session.messages) < 2:
         raise HTTPException(status_code=400, detail="Session too short to analyze")
-
-    conversation = [{"role": m.role, "content": m.content} for m in session.messages if m.role in ("user", "assistant")]
+    conversation = [
+        {"role": m.role, "content": m.content}
+        for m in session.messages if m.role in ("user", "assistant")
+    ]
     report = await analyze_weakness(conversation)
     stats_repo.save_weakness_report(req.session_id, session.topic, report)
     stats_repo.record_activity(session.topic)
@@ -80,24 +85,44 @@ async def get_star_stats():
 
 @router.post("/revision")
 async def get_revision_questions(req: RevisionRequest):
-    # Use a more specific query to get better chunks
-    query = f"algorithm pattern problem solution complexity {req.topic or 'software engineering'}"
-    chunks = await memory_service.search(query, topic=req.topic, k=10)
+    """
+    Generate senior-level revision questions grounded in the user's KB content.
+    Uses ChromaDB to pull actual content from notes, not generic questions.
+    """
+    # Pull rich content from ChromaDB — more chunks for better coverage
+    query = f"concepts patterns techniques explained {req.topic or 'software engineering interview'}"
+    chunks = await memory_service.search(query, topic=req.topic, k=12)
+
     if not chunks:
-        raise HTTPException(status_code=404, detail="No notes found. Run ingestion first.")
-    # Pick chunks with actual code/substance, not just README files
-    good_chunks = [c for c in chunks if len(c["content"]) > 100 and c["score"] > 0.4]
+        raise HTTPException(
+            status_code=404,
+            detail=f"No notes found for topic '{req.topic}'. Run ingestion first."
+        )
+
+    # Filter for substantive chunks (not just file headers or short snippets)
+    good_chunks = [
+        c for c in chunks
+        if len(c["content"]) > 150 and c["score"] > 0.3
+    ]
     if not good_chunks:
         good_chunks = chunks
-    combined = "\n\n".join(c["content"] for c in good_chunks[:8])
+
+    combined = "\n\n---\n\n".join(c["content"] for c in good_chunks[:10])
     questions = await generate_revision_questions(combined, count=req.count)
-    return {"questions": questions, "topic": req.topic, "source_chunks": len(good_chunks)}
+
+    return {
+        "questions": questions,
+        "topic": req.topic,
+        "source_chunks": len(good_chunks),
+        "note": "Questions generated from your personal knowledge base content"
+    }
+
 
 @router.post("/patterns")
 async def detect_patterns(req: PatternRequest):
     notes_dir = Path(settings.NOTES_DIR) / req.topic
     if not notes_dir.exists():
-        raise HTTPException(status_code=404, detail=f"No notes directory at data/notes/{req.topic}")
+        raise HTTPException(status_code=404, detail=f"No notes at data/notes/{req.topic}")
 
     files_content = {}
     for path in notes_dir.rglob("*"):
@@ -108,7 +133,7 @@ async def detect_patterns(req: PatternRequest):
                 continue
 
     if not files_content:
-        raise HTTPException(status_code=404, detail="No solution files found")
+        raise HTTPException(status_code=404, detail="No files found")
 
     return await detect_dsa_patterns(files_content)
 
