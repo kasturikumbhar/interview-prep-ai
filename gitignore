@@ -1,0 +1,35 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+**/*.pyc
+backend/.env
+
+# Data — structure tracked, content ignored
+backend/data/chroma/
+backend/data/sessions/
+backend/data/stats/
+backend/data/progress.db
+# Keep the notes directory structure but not content
+backend/data/notes/*
+!backend/data/notes/.gitkeep
+!backend/data/notes/dsa/.gitkeep
+!backend/data/notes/system_design/.gitkeep
+!backend/data/notes/java/.gitkeep
+!backend/data/notes/python/.gitkeep
+!backend/data/notes/aws/.gitkeep
+!backend/data/notes/behavioral/.gitkeep
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
