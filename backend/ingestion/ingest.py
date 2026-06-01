@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Enhanced ingestion script.
-- DSA solution files (.py, .java): extracts pattern, difficulty, problem name → SQLite
+- DSA solution files (.py, .java): extracts pattern, difficulty → SQLite progress DB
 - Knowledge Base MD files: extracts mastery, weaknesses, roadmap → SQLite
 - All files: chunks → ChromaDB for RAG
+- Mastery entries → revision_items for spaced repetition
 """
 import asyncio
 import argparse
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from app.services.memory_service import MemoryService
 from app.models.memory import MemoryChunk
 from app.repositories.progress_repository import ProgressRepository
+from app.repositories.interview_repository import RevisionRepository
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from ingestion.knowledge_base_parser import parse_knowledge_base_md, detect_category
@@ -64,6 +66,9 @@ DIFFICULTY_HINTS = {
 
 LC_RE = re.compile(r"(?:leetcode|lc)[#\s]*(\d+)|#(\d+)", re.IGNORECASE)
 COMPLEXITY_RE = re.compile(r"Time:\s*O\(([^)]+)\)", re.IGNORECASE)
+
+# Mastery score → difficulty mapping for revision
+MASTERY_TO_DIFFICULTY = {1: "hard", 2: "hard", 3: "medium", 4: "easy", 5: "easy"}
 
 
 def detect_topic(path: str) -> str:
@@ -129,6 +134,7 @@ async def ingest_file(
     path: Path,
     memory: MemoryService,
     progress: ProgressRepository,
+    revision: RevisionRepository,
     topic: str = None,
     source: str = "notes",
 ) -> int:
@@ -150,7 +156,6 @@ async def ingest_file(
     if path.suffix == ".md":
         kb_data = parse_knowledge_base_md(path)
         if kb_data:
-            # Store mastery entries
             for entry in kb_data.get("mastery_entries", []):
                 progress.upsert_topic_mastery(
                     topic_name=entry["topic"],
@@ -159,24 +164,39 @@ async def ingest_file(
                     mastery_label=entry["mastery_label"],
                     source_file=str(path),
                 )
+                # Also add to revision queue with appropriate difficulty
+                diff = MASTERY_TO_DIFFICULTY.get(entry["mastery"], "medium")
+                revision.upsert(
+                    topic=entry["category"],
+                    subtopic=entry["topic"],
+                    content=f"Mastery level: {entry['mastery_label']}. Review and strengthen this topic.",
+                    difficulty=diff,
+                    source_file=str(path),
+                )
 
-            # Store weaknesses
             if kb_data.get("weaknesses"):
                 cat = detect_category(path.stem) or resolved_topic
                 progress.save_kb_weaknesses(kb_data["weaknesses"], cat, str(path))
+                # Weaknesses go into revision as hard items
+                for weakness in kb_data["weaknesses"][:5]:
+                    revision.upsert(
+                        topic=cat,
+                        subtopic=weakness[:80],
+                        content=f"Known weakness: {weakness}",
+                        difficulty="hard",
+                        source_file=str(path),
+                    )
 
-            # Store roadmap items
             if kb_data.get("future_roadmap"):
                 cat = detect_category(path.stem) or resolved_topic
                 progress.save_roadmap_items(kb_data["future_roadmap"], cat, str(path))
 
             logger.info(
-                f"  → KB parsed: {len(kb_data.get('mastery_entries', []))} mastery, "
-                f"{len(kb_data.get('weaknesses', []))} weaknesses, "
-                f"{len(kb_data.get('future_roadmap', []))} roadmap items"
+                f"  → KB: {len(kb_data.get('mastery_entries', []))} mastery, "
+                f"{len(kb_data.get('weaknesses', []))} weaknesses → revision queue"
             )
 
-    # ── DSA solution files (.py, .java): extract metadata → SQLite ───────────
+    # ── DSA solution files: extract metadata → SQLite ────────────────────────
     elif resolved_topic == "dsa" and path.suffix in (".py", ".java"):
         meta = extract_dsa_metadata(content, path.name)
         try:
@@ -190,6 +210,15 @@ async def ingest_file(
                 leetcode_number=meta["leetcode_number"],
                 time_complexity=meta["time_complexity"],
             )
+            # Add to revision queue
+            if meta["pattern"]:
+                revision.upsert(
+                    topic="dsa",
+                    subtopic=f"{meta['problem_name']} ({meta['pattern']})",
+                    content=content[:500],
+                    difficulty=meta["difficulty"].lower(),
+                    source_file=str(path),
+                )
             logger.info(f"  → DSA: {meta['problem_name']} | {meta['pattern']} | {meta['difficulty']}")
         except Exception as e:
             logger.warning(f"Could not save DSA progress for {path.name}: {e}")
@@ -223,6 +252,7 @@ async def ingest_directory(
     directory: Path,
     memory: MemoryService,
     progress: ProgressRepository,
+    revision: RevisionRepository,
     topic: str = None,
     source: str = "notes",
 ) -> int:
@@ -232,7 +262,7 @@ async def ingest_directory(
         if any(part in ignore for part in path.parts):
             continue
         if path.is_file() and path.suffix in (".md", ".txt", ".py", ".java", ".rst"):
-            total += await ingest_file(path, memory, progress, topic, source)
+            total += await ingest_file(path, memory, progress, revision, topic, source)
     return total
 
 
@@ -245,6 +275,7 @@ async def main():
 
     memory = MemoryService()
     progress = ProgressRepository()
+    revision = RevisionRepository()
     total = 0
 
     if args.source == "notes":
@@ -252,7 +283,7 @@ async def main():
         if not notes_dir.exists():
             print(f"ERROR: {notes_dir} does not exist.")
             sys.exit(1)
-        total = await ingest_directory(notes_dir, memory, progress, source="notes")
+        total = await ingest_directory(notes_dir, memory, progress, revision, source="notes")
 
     elif args.source in ("repo", "file"):
         if not args.path:
@@ -263,14 +294,14 @@ async def main():
             print(f"ERROR: {p} does not exist")
             sys.exit(1)
         if p.is_dir():
-            total = await ingest_directory(p, memory, progress, topic=args.topic, source="repo")
+            total = await ingest_directory(p, memory, progress, revision, topic=args.topic, source="repo")
         else:
-            total = await ingest_file(p, memory, progress, topic=args.topic, source="file")
+            total = await ingest_file(p, memory, progress, revision, topic=args.topic, source="file")
 
     # Final report
     chroma_stats = memory.collection_stats()
     summary = progress.get_full_summary()
-    mastery = progress.get_mastery_summary()
+    revision_count = len(revision.get_all())
 
     print(f"\n✅ Ingested {total} chunks into ChromaDB")
     print("\n📊 ChromaDB collections:")
@@ -279,16 +310,17 @@ async def main():
             print(f"   {t:<20} → {c} chunks")
 
     print(f"\n🧠 Progress DB:")
-    print(f"   DSA problems tracked : {summary['total_problems']}")
-    print(f"   Patterns found       : {list(summary['patterns_covered'].keys())}")
-    print(f"   Missing patterns     : {summary['missing_patterns']}")
+    print(f"   DSA problems  : {summary['total_problems']}")
+    print(f"   Patterns found: {list(summary['patterns_covered'].keys())}")
+    print(f"   Missing       : {summary['missing_patterns']}")
 
+    mastery = progress.get_mastery_summary()
     if mastery:
         print(f"\n📚 Mastery by topic:")
         for cat, data in mastery.items():
-            print(f"   {cat:<20} → {data['topic_count']} topics, avg mastery {data['avg_mastery']}/5")
-            if data['weak_topics']:
-                print(f"      Weak: {data['weak_topics'][:3]}")
+            print(f"   {cat:<20} → {data['topic_count']} topics, avg {data['avg_mastery']}/5")
+
+    print(f"\n🔁 Revision queue: {revision_count} items")
 
 
 if __name__ == "__main__":

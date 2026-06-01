@@ -1,11 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
-from app.api.routes import chat, memory, models, analysis, progress
+from app.api.routes import chat, memory, models, analysis, progress, interview
 
 settings = get_settings()
 
-app = FastAPI(title=settings.APP_NAME, version="0.5.0")
+app = FastAPI(title=settings.APP_NAME, version="0.7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,8 +20,9 @@ app.include_router(memory.router, prefix="/api")
 app.include_router(models.router, prefix="/api")
 app.include_router(analysis.router, prefix="/api")
 app.include_router(progress.router, prefix="/api")
+app.include_router(interview.router, prefix="/api")
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.5.0"}
+    return {"status": "ok", "version": "0.7.0"}
