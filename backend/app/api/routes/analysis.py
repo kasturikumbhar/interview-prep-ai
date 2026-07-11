@@ -5,18 +5,23 @@ from pathlib import Path
 
 from app.services.analysis_service import (
     analyze_weakness, score_star_answer,
-    generate_revision_questions, detect_dsa_patterns,
+    generate_revision_questions, generate_question_for_subtopic,
+    detect_dsa_patterns,
 )
 from app.repositories.stats_repository import StatsRepository
 from app.repositories.session_repository import SessionRepository
+from app.repositories.interview_repository import RevisionRepository
 from app.services.memory_service import MemoryService
 from app.core.config import get_settings
+from app.core.logging import get_logger
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 stats_repo = StatsRepository()
 session_repo = SessionRepository()
+revision_repo = RevisionRepository()
 memory_service = MemoryService()
 settings = get_settings()
+logger = get_logger(__name__)
 
 
 class WeaknessRequest(BaseModel):
@@ -35,6 +40,10 @@ class RevisionRequest(BaseModel):
 
 class PatternRequest(BaseModel):
     topic: str = "dsa"
+
+
+class DueTodayQuestionsRequest(BaseModel):
+    limit: int = 10
 
 
 @router.post("/weakness")
@@ -86,35 +95,63 @@ async def get_star_stats():
 @router.post("/revision")
 async def get_revision_questions(req: RevisionRequest):
     """
-    Generate senior-level revision questions grounded in the user's KB content.
-    Uses ChromaDB to pull actual content from notes, not generic questions.
+    Generate senior-level questions using LLM knowledge + KB context.
+    KB content gives topic hints; LLM generates real interview questions.
     """
-    # Pull rich content from ChromaDB — more chunks for better coverage
-    query = f"concepts patterns techniques explained {req.topic or 'software engineering interview'}"
-    chunks = await memory_service.search(query, topic=req.topic, k=12)
+    # Get KB content as context (what topics the candidate has studied)
+    query = f"{req.topic or 'software engineering'} concepts patterns techniques"
+    chunks = await memory_service.search(query, topic=req.topic, k=10)
 
-    if not chunks:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No notes found for topic '{req.topic}'. Run ingestion first."
-        )
+    # Use content as topic context, not as question source
+    content = ""
+    if chunks:
+        good = [c for c in chunks if len(c["content"]) > 100]
+        content = "\n\n".join(c["content"] for c in (good or chunks)[:8])
 
-    # Filter for substantive chunks (not just file headers or short snippets)
-    good_chunks = [
-        c for c in chunks
-        if len(c["content"]) > 150 and c["score"] > 0.3
-    ]
-    if not good_chunks:
-        good_chunks = chunks
-
-    combined = "\n\n---\n\n".join(c["content"] for c in good_chunks[:10])
-    questions = await generate_revision_questions(combined, count=req.count)
+    questions = await generate_revision_questions(
+        content=content,
+        count=req.count,
+        topic=req.topic or "dsa",
+    )
 
     return {
         "questions": questions,
         "topic": req.topic,
-        "source_chunks": len(good_chunks),
-        "note": "Questions generated from your personal knowledge base content"
+        "source_chunks": len(chunks),
+        "note": "Questions generated using LLM knowledge + your KB as context"
+    }
+
+
+@router.post("/revision/due-today-questions")
+async def get_due_today_as_questions(req: DueTodayQuestionsRequest):
+    """
+    Convert due-today revision items into proper interview questions with hints.
+    Generates questions using LLM knowledge about each subtopic.
+    """
+    due_items = revision_repo.get_due_today(limit=req.limit)
+
+    if not due_items:
+        return {"questions": [], "count": 0, "message": "Nothing due today"}
+
+    questions = []
+    for item in due_items:
+        topic = item.get("topic", "general")
+        subtopic = item.get("subtopic", "")
+
+        if not subtopic or len(subtopic.strip()) < 3:
+            continue
+
+        q = await generate_question_for_subtopic(topic, subtopic)
+        if q:
+            q["revision_item_id"] = item["id"]
+            q["confidence_score"] = item.get("confidence_score", 3)
+            q["review_count"] = item.get("review_count", 0)
+            questions.append(q)
+
+    return {
+        "questions": questions,
+        "count": len(questions),
+        "items_processed": len(due_items),
     }
 
 
