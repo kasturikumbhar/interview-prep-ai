@@ -160,7 +160,7 @@ class LLMService:
     async def embed(self, text: str) -> list[float]:
         text = text.strip()[:2000]
         if not text:
-            return [0.0] * 768
+            return [0.0] * 1024
         payload = {"model": settings.EMBED_MODEL, "prompt": text}
         async with httpx.AsyncClient(timeout=60) as client:
             try:

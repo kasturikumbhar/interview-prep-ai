@@ -10,6 +10,7 @@ backend/data/chroma/
 backend/data/sessions/
 backend/data/notes/
 backend/data/stats/
+backend/data/
 !backend/data/notes/.gitkeep
 
 # Frontend
