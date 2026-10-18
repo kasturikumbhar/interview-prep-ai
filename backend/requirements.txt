@@ -5,7 +5,7 @@ pydantic-settings==2.7.0
 httpx==0.28.1
 chromadb==0.5.23
 
-# Reranker — downloads BAAI/bge-reranker-base (~270MB on first run)
+# Reranker — bge-reranker-base (~270MB, downloads on first inference)
 # Runs on Apple Silicon MPS automatically
 sentence-transformers==3.3.1
-torch==2.5.1
+torch>=2.1.0

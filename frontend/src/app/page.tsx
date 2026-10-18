@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 
-const BASE = "http://localhost:8000/api";
+const BASE = "http://localhost:8001/api";
 const INTERVIEW_STORAGE_KEY = "prepai_interview_v1";
 const REVISION_STORAGE_KEY  = "prepai_revision_v1";
 

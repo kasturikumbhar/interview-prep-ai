@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-Ingestion script — semantic chunking + file hash cache + rich metadata.
-
-Changes from v11:
-- Uses semantic_chunker.py (no more fixed chunk_text())
-- Skips unchanged files via MD5 hash cache
-- Stores heading_path, chunk_id, difficulty, chunk_type in Chroma
-- Invalidates BM25 cache after ingestion
+Ingestion script — semantic chunking + MD5 file cache + rich Chroma metadata.
 
 Usage:
-    python ingestion/ingest.py --source notes           # ingest all notes
-    python ingestion/ingest.py --source notes --clear   # clear + re-ingest
-    python ingestion/ingest.py --source file --path x.md --topic java
+    python ingestion/ingest.py --source notes           # incremental (skips unchanged)
+    python ingestion/ingest.py --source notes --clear   # clear + full re-ingest
+    python ingestion/ingest.py --source notes --force   # force all files
+    python ingestion/ingest.py --source repo --path /path/to/DE --topic dsa
+    python ingestion/ingest.py --source file --path kafka.md --topic system_design
 """
 import asyncio
 import argparse
@@ -30,7 +26,7 @@ from app.core.logging import get_logger
 from ingestion.semantic_chunker import (
     chunk_markdown, chunk_resume, chunk_star_stories, SemanticChunk,
 )
-from ingestion_cache import is_unchanged, mark_ingested, clear_cache
+from ingestion.ingestion_cache import is_unchanged, mark_ingested, clear_cache
 
 try:
     from app.services.retrieval_service import invalidate_bm25_cache
@@ -51,25 +47,25 @@ TOPIC_HINTS = {
 }
 
 PATTERN_KEYWORDS = {
-    "Sliding Window":       ["sliding window", "window size"],
-    "Two Pointers":         ["two pointer", "l, r =", "l=0"],
-    "Fast Slow Pointers":   ["slow", "fast", "cycle detection"],
-    "Merge Intervals":      ["merge interval", "intervals.sort"],
-    "Binary Search":        ["binary search", "bisect", "l+(r-l)//2"],
-    "Tree BFS":             ["level order", "collections.deque"],
-    "Tree DFS":             ["dfs", "inorder", "preorder", "postorder"],
-    "Graph BFS":            ["visited", "bfs", "queue.append"],
-    "Graph DFS":            ["dfs", "visited", "adjacency"],
-    "Topological Sort":     ["topological", "indegree", "kahn"],
-    "Backtracking":         ["backtrack", "path.append", "path.pop"],
-    "Heap":                 ["heapq", "heappush", "heappop"],
-    "Two Heaps":            ["max_heap", "min_heap", "median"],
-    "Greedy":               ["greedy"],
+    "Sliding Window":         ["sliding window", "window size"],
+    "Two Pointers":           ["two pointer", "l, r =", "l=0"],
+    "Fast Slow Pointers":     ["slow", "fast", "cycle detection"],
+    "Merge Intervals":        ["merge interval", "intervals.sort"],
+    "Binary Search":          ["binary search", "bisect", "l+(r-l)//2"],
+    "Tree BFS":               ["level order", "collections.deque"],
+    "Tree DFS":               ["dfs", "inorder", "preorder", "postorder"],
+    "Graph BFS":              ["visited", "bfs", "queue.append"],
+    "Graph DFS":              ["dfs", "visited", "adjacency"],
+    "Topological Sort":       ["topological", "indegree", "kahn"],
+    "Backtracking":           ["backtrack", "path.append", "path.pop"],
+    "Heap":                   ["heapq", "heappush", "heappop"],
+    "Two Heaps":              ["max_heap", "min_heap", "median"],
+    "Greedy":                 ["greedy"],
     "Dynamic Programming 1D": ["dp[i]", "memo", "memoization"],
     "Dynamic Programming 2D": ["dp[i][j]", "dp = [["],
-    "Trie":                 ["trie", "TrieNode"],
-    "Union Find":           ["union find", "parent[", "find("],
-    "Monotonic Stack":      ["monotonic", "mono_stack"],
+    "Trie":                   ["trie", "TrieNode"],
+    "Union Find":             ["union find", "parent[", "find("],
+    "Monotonic Stack":        ["monotonic", "mono_stack"],
 }
 
 DIFFICULTY_HINTS = {
@@ -93,30 +89,24 @@ def detect_topic(path: str) -> str:
 
 def extract_dsa_metadata(content: str, filename: str) -> dict:
     cl = content.lower()
-    problem_name = (
-        Path(filename).stem.replace("_", " ").replace("-", " ").title().strip()
-    )
-    pattern     = next((p for p, kws in PATTERN_KEYWORDS.items()
-                        if any(kw in cl for kw in kws)), None)
-    difficulty  = next((d for d, hints in DIFFICULTY_HINTS.items()
-                        if any(h in cl for h in hints)), "Medium")
-    lc_match    = LC_RE.search(content)
-    lc_number   = int(lc_match.group(1) or lc_match.group(2)) if lc_match else None
-    time_match  = COMPLEXITY_RE.search(content)
-    time_compl  = f"O({time_match.group(1)})" if time_match else None
-    language    = {".py": "python", ".java": "java"}.get(
-                    Path(filename).suffix, "python")
     return {
-        "problem_name": problem_name, "pattern": pattern,
-        "difficulty": difficulty, "leetcode_number": lc_number,
-        "time_complexity": time_compl, "language": language,
+        "problem_name": Path(filename).stem.replace("_"," ").replace("-"," ").title().strip(),
+        "pattern":      next((p for p, kws in PATTERN_KEYWORDS.items()
+                              if any(kw in cl for kw in kws)), None),
+        "difficulty":   next((d for d, hints in DIFFICULTY_HINTS.items()
+                              if any(h in cl for h in hints)), "Medium"),
+        "leetcode_number": (lambda m: int(m.group(1) or m.group(2)) if m else None)(
+                            LC_RE.search(content)),
+        "time_complexity": (lambda m: f"O({m.group(1)})" if m else None)(
+                            COMPLEXITY_RE.search(content)),
+        "language": {".py": "python", ".java": "java"}.get(
+                    Path(filename).suffix, "python"),
     }
 
 
 async def ingest_semantic_chunks(
     chunks: list[SemanticChunk],
     memory: MemoryService,
-    progress: ProgressRepository,
     revision: RevisionRepository,
 ) -> int:
     count = 0
@@ -130,18 +120,13 @@ async def ingest_semantic_chunks(
                 source="notes",
                 source_path=chunk.source_file,
                 tags=[chunk.subcategory, chunk.topic, chunk.chunk_type],
-                # Pass full semantic metadata — stored in Chroma
-                metadata=chunk.to_chroma_metadata(),
+                metadata=chunk.to_chroma_metadata(),  # rich metadata → Chroma
             )
             await memory.ingest(mem_chunk)
 
-            # Populate spaced-repetition revision queue
-            if chunk.topic in (
-                "dsa", "java", "python", "aws", "system_design", "behavioral"
-            ):
-                diff = (chunk.difficulty.lower()
-                        if chunk.difficulty != "unknown"
-                        else "medium")
+            # Spaced-repetition revision queue
+            if chunk.topic in ("dsa","java","python","aws","system_design","behavioral"):
+                diff = chunk.difficulty.lower() if chunk.difficulty != "unknown" else "medium"
                 revision.upsert(
                     topic=chunk.topic,
                     subtopic=chunk.heading or chunk.subcategory,
@@ -166,7 +151,7 @@ async def ingest_file(
     if path.suffix not in (".md", ".txt", ".py", ".java", ".rst"):
         return 0
 
-    # ── Cache check — skip unchanged files ───────────────────────────────────
+    # MD5 cache — skip unchanged files
     if not force and is_unchanged(path):
         logger.debug(f"Skipping unchanged: {path.name}")
         return 0
@@ -174,7 +159,7 @@ async def ingest_file(
     try:
         content = path.read_text(encoding="utf-8")
     except Exception as e:
-        logger.warning(f"Could not read {path}: {e}")
+        logger.warning(f"Cannot read {path}: {e}")
         return 0
 
     if not content.strip():
@@ -182,7 +167,7 @@ async def ingest_file(
 
     resolved_topic = topic or detect_topic(str(path))
 
-    # ── Semantic chunking by file type ────────────────────────────────────────
+    # ── Choose chunking strategy ──────────────────────────────────────────────
     if path.suffix == ".md":
         is_behavioral = (
             resolved_topic == "behavioral"
@@ -199,7 +184,6 @@ async def ingest_file(
             chunks = chunk_markdown(content, str(path), topic=resolved_topic)
 
     elif path.suffix in (".py", ".java") and resolved_topic == "dsa":
-        # Extract structured progress metadata
         meta = extract_dsa_metadata(content, path.name)
         try:
             progress.upsert_problem(
@@ -217,27 +201,23 @@ async def ingest_file(
                 f"{meta['pattern']} | {meta['difficulty']}"
             )
         except Exception as e:
-            logger.warning(f"DSA progress save failed for {path.name}: {e}")
+            logger.warning(f"DSA progress save failed: {e}")
 
-        # Wrap in markdown so semantic chunker understands structure
         wrapped = (
             f"## {meta['problem_name']}\n\n"
-            f"Pattern: {meta['pattern']}\n"
-            f"Difficulty: {meta['difficulty']}\n\n"
+            f"Pattern: {meta['pattern']} | Difficulty: {meta['difficulty']}\n\n"
             f"```{meta['language']}\n{content}\n```"
         )
         chunks = chunk_markdown(wrapped, str(path), topic="dsa")
 
     else:
-        # Other code / text files
         wrapped = f"## {path.stem}\n\n```\n{content[:3000]}\n```"
         chunks  = chunk_markdown(wrapped, str(path), topic=resolved_topic)
 
-    count = await ingest_semantic_chunks(chunks, memory, progress, revision)
+    count = await ingest_semantic_chunks(chunks, memory, revision)
     logger.info(f"  {path.name}: {count} semantic chunks (topic={resolved_topic})")
 
-    # Mark file as ingested in cache
-    mark_ingested(path)
+    mark_ingested(path)  # save MD5 to cache
     return count
 
 
@@ -251,11 +231,10 @@ async def ingest_directory(
 ) -> int:
     total  = 0
     ignore = {"node_modules",".git","__pycache__",".venv","venv","dist","build"}
-    exts   = {".md",".txt",".py",".java",".rst"}
     for path in sorted(directory.rglob("*")):
         if any(part in ignore for part in path.parts):
             continue
-        if path.is_file() and path.suffix in exts:
+        if path.is_file() and path.suffix in (".md",".txt",".py",".java",".rst"):
             total += await ingest_file(
                 path, memory, progress, revision, topic, force=force
             )
@@ -268,7 +247,7 @@ async def main():
     parser.add_argument("--path",  type=str)
     parser.add_argument("--topic", type=str)
     parser.add_argument("--clear", action="store_true",
-                        help="Clear ChromaDB + cache before ingesting")
+                        help="Clear ChromaDB collections and ingestion cache")
     parser.add_argument("--force", action="store_true",
                         help="Re-ingest all files even if unchanged")
     args = parser.parse_args()
@@ -279,7 +258,7 @@ async def main():
     total    = 0
 
     if args.clear:
-        print("⚠️  Clearing ChromaDB collections and ingestion cache...")
+        print("⚠️  Clearing ChromaDB + ingestion cache...")
         clear_cache()
         for t in ["dsa","system_design","java","python","aws",
                   "behavioral","projects","general"]:
@@ -297,30 +276,25 @@ async def main():
     if args.source == "notes":
         notes_dir = Path(settings.NOTES_DIR)
         if not notes_dir.exists():
-            print(f"ERROR: {notes_dir} does not exist. Run: mkdir -p {notes_dir}")
+            print(f"ERROR: {notes_dir} not found. Run: mkdir -p {notes_dir}")
             sys.exit(1)
-        total = await ingest_directory(
-            notes_dir, memory, progress, revision, force=force
-        )
+        total = await ingest_directory(notes_dir, memory, progress, revision, force=force)
 
-    elif args.source in ("repo","file"):
+    elif args.source in ("repo", "file"):
         if not args.path:
             print("ERROR: --path required"); sys.exit(1)
         p = Path(args.path)
         if not p.exists():
-            print(f"ERROR: {p} does not exist"); sys.exit(1)
+            print(f"ERROR: {p} not found"); sys.exit(1)
         if p.is_dir():
             total = await ingest_directory(
-                p, memory, progress, revision,
-                topic=args.topic, force=force
+                p, memory, progress, revision, topic=args.topic, force=force
             )
         else:
             total = await ingest_file(
-                p, memory, progress, revision,
-                topic=args.topic, force=force
+                p, memory, progress, revision, topic=args.topic, force=force
             )
 
-    # Invalidate BM25 so next query rebuilds from fresh chunks
     invalidate_bm25_cache()
 
     # ── Final report ──────────────────────────────────────────────────────────
@@ -335,16 +309,16 @@ async def main():
             print(f"   {t:<20} → {c} chunks")
 
     print(f"\n🧠  DSA Progress: {summary['total_problems']} problems")
-    if summary["patterns_covered"]:
+    if summary.get("patterns_covered"):
         print(f"    Patterns: {list(summary['patterns_covered'].keys())}")
-    if summary["missing_patterns"]:
+    if summary.get("missing_patterns"):
         print(f"    Missing:  {summary['missing_patterns'][:5]}")
 
     if mastery:
         print(f"\n📚  Mastery by topic:")
         for cat, data in mastery.items():
             print(f"   {cat:<20} → {data['topic_count']} topics, "
-                  f"avg mastery {data['avg_mastery']}/5")
+                  f"avg {data['avg_mastery']}/5")
 
 
 if __name__ == "__main__":

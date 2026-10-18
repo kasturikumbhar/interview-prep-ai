@@ -1,6 +1,7 @@
 """
-Memory service — ChromaDB-backed RAG pipeline.
-One collection per topic for fast filtered retrieval.
+Memory service — ChromaDB with rich per-chunk metadata.
+Stores heading_path, chunk_id, difficulty, chunk_type so retrieval
+and RRF can use them for filtering and citation generation.
 """
 import chromadb
 from chromadb.config import Settings as ChromaSettings
@@ -12,9 +13,9 @@ from app.models.memory import MemoryChunk, TopicType
 from app.services.llm_service import LLMService
 
 settings = get_settings()
-logger = get_logger(__name__)
+logger   = get_logger(__name__)
 
-TOPICS = ["dsa", "system_design", "java", "python", "aws", "behavioral", "projects", "general"]
+TOPICS = ["dsa","system_design","java","python","aws","behavioral","projects","general"]
 
 
 class MemoryService:
@@ -41,55 +42,76 @@ class MemoryService:
         )
 
     async def ingest(self, chunk: MemoryChunk) -> str:
-        embedding = await self._llm.embed(chunk.content)
+        embedding  = await self._llm.embed(chunk.content)
         collection = self._get_or_create_collection(chunk.topic)
+
+        # All semantic fields stored as Chroma metadata
+        metadata = {
+            "topic":          chunk.topic,
+            "source":         chunk.source,
+            "source_path":    chunk.source_path or "",
+            "tags":           ",".join(chunk.tags),
+            "created_at":     chunk.created_at.isoformat(),
+            # Rich fields from SemanticChunk.to_chroma_metadata()
+            "heading":        chunk.metadata.get("heading", ""),
+            "parent_heading": chunk.metadata.get("parent_heading", ""),
+            "heading_path":   chunk.metadata.get("heading_path", ""),
+            "chunk_id":       chunk.metadata.get("chunk_id", chunk.id),
+            "document_id":    chunk.metadata.get("document_id", ""),
+            "difficulty":     chunk.metadata.get("difficulty", "unknown"),
+            "chunk_type":     chunk.metadata.get("chunk_type", "text"),
+            "subcategory":    chunk.metadata.get("subcategory", ""),
+        }
+
         collection.upsert(
             ids=[chunk.id],
             embeddings=[embedding],
             documents=[chunk.content],
-            metadatas=[{
-                "topic": chunk.topic,
-                "source": chunk.source,
-                "source_path": chunk.source_path or "",
-                "tags": ",".join(chunk.tags),
-                "created_at": chunk.created_at.isoformat(),
-            }],
+            metadatas=[metadata],
         )
-        logger.info(f"Ingested chunk {chunk.id} → topic={chunk.topic}")
         return chunk.id
 
-    async def search(self, query: str, topic: Optional[TopicType] = None, k: int = 5) -> list[dict]:
+    async def search(
+        self,
+        query: str,
+        topic: Optional[TopicType] = None,
+        k: int = 5,
+        where: Optional[dict] = None,
+    ) -> list[dict]:
         embedding = await self._llm.embed(query)
 
-        collections_to_search = (
+        collections = (
             [self._get_or_create_collection(topic)]
             if topic
             else [self._get_or_create_collection(t) for t in TOPICS]
         )
 
         results = []
-        for collection in collections_to_search:
+        for col in collections:
             try:
-                count = collection.count()
+                count = col.count()
                 if count == 0:
                     continue
-                resp = collection.query(
+                kwargs = dict(
                     query_embeddings=[embedding],
                     n_results=min(k, count),
                     include=["documents", "metadatas", "distances"],
                 )
+                if where:
+                    kwargs["where"] = where
+                resp = col.query(**kwargs)
                 for doc, meta, dist in zip(
                     resp["documents"][0],
                     resp["metadatas"][0],
                     resp["distances"][0],
                 ):
                     results.append({
-                        "content": doc,
+                        "content":  doc,
                         "metadata": meta,
-                        "score": round(1 - dist, 4),
+                        "score":    round(1 - dist, 4),
                     })
             except Exception as e:
-                logger.warning(f"Search failed for {collection.name}: {e}")
+                logger.warning(f"Search failed for {col.name}: {e}")
 
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:k]
@@ -98,21 +120,7 @@ class MemoryService:
         stats = {}
         for topic in TOPICS:
             try:
-                col = self._get_or_create_collection(topic)
-                stats[topic] = col.count()
+                stats[topic] = self._get_or_create_collection(topic).count()
             except Exception:
                 stats[topic] = 0
         return stats
-
-    async def build_context(self, query: str, topic: Optional[str] = None) -> str:
-        chunks = await self.search(query, topic=topic, k=settings.DEFAULT_RETRIEVAL_K)
-        if not chunks:
-            return ""
-        lines = ["--- Context from your personal notes and solutions ---"]
-        for i, chunk in enumerate(chunks, 1):
-            meta = chunk["metadata"]
-            source_file = meta.get("source_path", "unknown").split("/")[-1]
-            lines.append(f"\n[{i}] File: {source_file} | Topic: {meta.get('topic')} | Relevance: {chunk['score']}")
-            lines.append(chunk["content"])
-        lines.append("\n--- End of personal context ---")
-        return "\n".join(lines)
