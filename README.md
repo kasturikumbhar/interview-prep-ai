@@ -7,7 +7,7 @@
 
 ## Why this exists
 
-Built to prepare for senior backend engineering interviews at Google / Amazon / Uber while demonstrating the kind of system design and implementation decisions that those same interviewers look for.
+Built to prepare for senior backend engineering interviews while demonstrating the kind of system design and implementation decisions that those same interviewers look for.
 
 Every architectural choice here — hybrid retrieval, reranking, semantic chunking, confidence fallback — was made to solve a real problem, not to add complexity.
 
