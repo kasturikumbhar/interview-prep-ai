@@ -1,13 +1,13 @@
-# PrepAI — Personal Interview Preparation OS
+# PrepAI — Personal Knowledge OS
 
-> **Local-first AI interview coaching built with production RAG engineering.**
+> **Local-first AI learning and knowledge workspace built with production RAG engineering.**
 > Runs entirely on your machine. Zero cloud. Zero API costs. Complete data privacy.
 
 ---
 
 ## Why this exists
 
-Built to prepare for senior backend engineering interviews while demonstrating the kind of system design and implementation decisions that those same interviewers look for.
+Built to turn scattered notes, project context, and research into a searchable personal knowledge base that feels like an expert assistant working directly from your own material.
 
 Every architectural choice here — hybrid retrieval, reranking, semantic chunking, confidence fallback — was made to solve a real problem, not to add complexity.
 
@@ -18,7 +18,7 @@ Every architectural choice here — hybrid retrieval, reranking, semantic chunki
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Browser  (Next.js :3000)                  │
-│  Mock Interview │ Chat │ Resume │ Stories │ Revision │ Stats │
+│  Chat │ Notes │ Projects │ Research │ Revision │ Progress │
 └────────────────────────────┬────────────────────────────────┘
                              │ HTTP
                              ▼
@@ -26,7 +26,7 @@ Every architectural choice here — hybrid retrieval, reranking, semantic chunki
 │              FastAPI Backend  (:8000)                        │
 │  ObservabilityMiddleware  →  trace_id + latency per request  │
 │                                                              │
-│   /api/chat      /api/interview    /api/analysis             │
+│   /api/chat      /api/knowledge    /api/analysis             │
 │   /api/progress  /api/memory       /api/models               │
 └──────┬────────────────────────────────────┬─────────────────┘
        │                                    │
@@ -34,12 +34,12 @@ Every architectural choice here — hybrid retrieval, reranking, semantic chunki
 ┌──────────────┐                  ┌──────────────────────────┐
 │   SQLite DB  │                  │   Retrieval Pipeline      │
 │              │                  │                           │
-│ problems     │◄── progress Qs   │  1. Query Rewriting       │
-│ mastery      │    (facts, never │     + ref resolution      │
+│ notes        │◄── progress Qs   │  1. Query Rewriting       │
+│ projects     │    (facts, never │     + ref resolution      │
 │ sessions     │     inferred)    │     ("explain that" →     │
-│ stories      │                  │      previous topic)      │
-│ revision     │                  │                           │
-│ star_scores  │                  │  2. Intent Classification │
+│ topics       │                  │      previous topic)      │
+│ concepts     │                  │                           │
+│ stats        │                  │  2. Intent Classification │
 └──────────────┘                  │     → topic routing       │
                                   │                           │
                                   │  3. Parallel search       │
@@ -75,7 +75,7 @@ Every architectural choice here — hybrid retrieval, reranking, semantic chunki
                                   │  Ollama LLM              │
                                   │  qwen2.5-coder:7b (16GB) │
                                   │  qwen3:14b       (32GB)  │
-                                  │  8 interview personas    │
+                                  │  8 assistant personas    │
                                   │  num_predict=8192        │
                                   └──────────────────────────┘
 ```
@@ -101,17 +101,17 @@ Every architectural choice here — hybrid retrieval, reranking, semantic chunki
 ## Retrieval pipeline in detail
 
 ```
-User: "kafka consumer group rebalancing"
+User: "distributed tracing tail latency"
                 │
                 ▼
     ┌─────────────────────┐
-    │   Query Rewriting   │  → "Apache Kafka consumer group rebalancing
-    │ (short/ref queries) │     partition assignment coordinator protocol
-    └─────────────────────┘     offset commit ISR"
+    │   Query Rewriting   │  → "distributed tracing tail latency
+    │ (short/ref queries) │     service dependency graph sampling
+    └─────────────────────┘     observability bottleneck"
                 │
                 ▼
     ┌─────────────────────┐
-    │ Intent Classification│  → topic: system_design
+    │ Intent Classification│  → topic: architecture
     └─────────────────────┘
                 │
         ┌───────┴────────┐
@@ -136,8 +136,8 @@ User: "kafka consumer group rebalancing"
                 │
                 ▼
     Context with citations:
-    [1] kafka_notes.md → Kafka > Consumer Groups > Rebalancing
-    [2] system_design_kb.md → Distributed Systems > Partition Assignment
+    [1] observability_notes.md → Systems > Tracing > Tail Latency
+    [2] architecture_kb.md → Distributed Systems > Sampling
                 │
                 ▼
     qwen2.5-coder:7b / qwen3:14b
@@ -150,17 +150,17 @@ User: "kafka consumer group rebalancing"
 
 ## Semantic chunking
 
-**Before** (fixed 600-char): One chunk might contain Kafka producer config, consumer group logic, and offset management mixed together. The model retrieves 5 mixed chunks and produces a generic blend.
+**Before** (fixed 600-char): One chunk might contain architecture notes, observability details, and deployment guidance mixed together. The model retrieves 5 mixed chunks and produces a generic blend.
 
 **After** (semantic): Each markdown `##` header becomes its own chunk with full lineage:
 
 ```
 chunk: "## Rebalancing"
-heading_path: "Kafka > Consumer Groups > Rebalancing"
-topic: system_design
+heading_path: "Systems > Distributed Data > Rebalancing"
+topic: architecture
 difficulty: medium
 chunk_type: text
-source: kafka_deep_dive.md
+source: distributed_systems_notes.md
 ```
 
 The model now gets 5 focused chunks on exactly the topic asked.
@@ -223,23 +223,23 @@ Open http://localhost:3000
 
 ```
 backend/data/notes/
-├── dsa/
-│   ├── two_sum.py               # LeetCode solutions — pattern auto-detected
-│   ├── sliding_window.py
-│   └── patterns_guide.md        # Pattern notes — semantic chunked
-├── system_design/
-│   ├── kafka_deep_dive.md       # Each ## header = one chunk
-│   └── url_shortener.md
-├── java/
-│   └── spring_internals.md
+├── engineering/
+│   ├── system_design.md          # Architecture notes — semantic chunked
+│   ├── observability.md
+│   └── api_patterns.md
+├── research/
+│   ├── retrieval_ranking.md       # Each ## header = one chunk
+│   └── machine_learning.md
 ├── python/
-│   └── pyspark_notes.md
+│   └── async_patterns.md
+├── java/
+│   └── concurrency_notes.md
 ├── aws/
 │   └── service_guide.md
-├── behavioral/                  # Auto-detected: one STAR story per chunk
-│   └── star_stories.md
-└── projects/
-    └── resume_context.md
+├── projects/
+│   └── product_context.md
+└── personal/
+    └── learning_notes.md
 ```
 
 ---
@@ -259,25 +259,25 @@ python ingestion/ingest.py --source notes
 python ingestion/ingest.py --source notes --force
 
 # Single file
-python ingestion/ingest.py --source file --path notes/kafka.md --topic system_design
+python ingestion/ingest.py --source file --path notes/system_design.md --topic architecture
 
-# External repo (e.g. your DSA GitHub solutions)
-python ingestion/ingest.py --source repo --path ~/code/dsa-solutions --topic dsa
+# External repo (e.g. your code or research notes)
+python ingestion/ingest.py --source repo --path ~/code/notes --topic research
 ```
 
 Expected output:
 ```
 ✅  Ingested 847 semantic chunks
 📊  ChromaDB collections:
-   dsa                  → 312 chunks
-   system_design        → 89 chunks
-   java                 → 124 chunks
-   python               → 98 chunks
+   engineering          → 312 chunks
+   research             → 89 chunks
+   python               → 124 chunks
+   java                 → 98 chunks
    aws                  → 71 chunks
-   behavioral           → 43 chunks
-🧠  DSA Progress: 47 problems
-    Patterns: ['Binary Search', 'Two Pointers', 'Graph DFS', 'Backtracking']
-    Missing:  ['Two Heaps', 'Monotonic Stack', 'Trie']
+   personal             → 43 chunks
+🧠  Knowledge coverage:
+    Topics: ['system design', 'observability', 'retrieval', 'ML', 'Python']
+    Missing: ['distributed systems', 'message queues', 'deployment']
 ```
 
 ---
@@ -305,11 +305,11 @@ Output:
 
   By topic:
     aws                  hit=100%  (2 queries)
-    behavioral           hit=100%  (1 queries)
-    dsa                  hit=80%   (5 queries)
+    engineering         hit=100%  (1 queries)
     java                 hit=100%  (2 queries)
+    personal             hit=100%  (1 queries)
     python               hit=100%  (2 queries)
-    system_design        hit=67%   (3 queries)
+    research             hit=67%   (3 queries)
 ```
 
 Or via API: `POST /api/analysis/evaluate`
@@ -335,14 +335,14 @@ Ollama runs in your menu bar automatically.
 
 | Tab | What it does |
 |-----|-------------|
-| 🎯 Mock Interview | 6 personas: DSA / System Design / Java / Python / AWS / Behavioral. Session auto-saved — tab switches never lose state |
 | 💬 Chat | Hybrid RAG with inline citations `[1][2]` and confidence fallback disclosure |
-| 📄 Resume | Paste resume → skill/project extraction → interview questions use it (70% resume-grounded) |
-| 📖 Story Bank | Add STAR stories → behavioral interviewer pulls them automatically |
-| 🔁 Revision | **Generate Qs**: LLM-powered senior questions from your KB. **Due Today**: spaced repetition queue with confidence 1-5 rating |
-| 📈 Progress | DSA patterns covered, topic mastery from KB, daily study recommendations |
-| 🔍 Patterns | DSA gap analysis vs 19-pattern senior benchmark |
-| ⭐ STAR Scorer | Component-level scoring (Situation/Task/Action/Result each 1-5) with improvement hints |
+| 📝 Notes | Organize markdown knowledge and semantic search across your library |
+| 📁 Projects | Attach project docs, context, and architecture notes to answer grounded questions |
+| 🧠 Research | Ask questions using your local corpus with citations and topic routing |
+| 🔁 Revision | Generate follow-up questions from your knowledge base and track learning progress |
+| 📈 Progress | Topic mastery from your KB, daily study recommendations, and coverage gaps |
+| 🔍 Knowledge Graph | Connect related concepts and understand topic overlap across sources |
+| ⭐ Quality | Confidence tracking, retrieval metrics, and source-backed answers |
 
 ---
 
@@ -418,3 +418,11 @@ python ingestion/ingest.py --source notes --clear
 → Re-run: python ingestion/ingest.py --source notes
 → Re-run eval to confirm improvement
 ```
+
+---
+
+## What this project is not
+
+PrepAI is not a replacement for your own notes or a cloud AI service. It is a local-first knowledge companion that helps you search, reason over, and revisit your own material with citations and traceable answers.
+
+---
